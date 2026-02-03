@@ -32,7 +32,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	resp := map[string][]string{"tools": s.Registry.List()}
+	resp := map[string][]string{"tools": s.Registry.ListNames()}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 

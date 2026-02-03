@@ -18,7 +18,8 @@ type ListAddTool struct {
 	BaseDir string
 }
 
-func (t *ListAddTool) Name() string { return "list_add" }
+func (t *ListAddTool) Name() string        { return "list_add" }
+func (t *ListAddTool) Description() string { return "Add an item to a list. Args: list, item." }
 
 func (t *ListAddTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	var in ListInput
@@ -55,7 +56,8 @@ type ListRemoveTool struct {
 	BaseDir string
 }
 
-func (t *ListRemoveTool) Name() string { return "list_remove" }
+func (t *ListRemoveTool) Name() string        { return "list_remove" }
+func (t *ListRemoveTool) Description() string { return "Remove an item from a list. Args: list, item." }
 
 func (t *ListRemoveTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	var in ListInput
@@ -110,6 +112,9 @@ type ListShowTool struct {
 }
 
 func (t *ListShowTool) Name() string { return "list_show" }
+func (t *ListShowTool) Description() string {
+	return "Show items from a list. Args: list."
+}
 
 func (t *ListShowTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	var in ListInput

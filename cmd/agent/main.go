@@ -172,7 +172,9 @@ func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.A
 	if packet, ok := r.Route(text); ok {
 		log.Printf("router match: %s", packet.Intent)
 		reply := r.GenerateReply(packet)
+		stopTyping := startTyping(ctx, adapter, msg.SenderID)
 		_ = adapter.Send(ctx, msg.SenderID, reply)
+		stopTyping()
 		executePacket(ctx, packet, toolRegistry, adapter, msg.SenderID)
 		return
 	}
@@ -189,7 +191,9 @@ func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.A
 	}
 
 	fullPrompt := promptContext + text
+	stopTyping := startTyping(ctx, adapter, msg.SenderID)
 	resp, err := codexClient.Exec(ctx, state.ID, state.Dir, fullPrompt, useLast)
+	stopTyping()
 	if err != nil {
 		_ = adapter.Send(ctx, msg.SenderID, "LLM Error: "+err.Error())
 		return
@@ -217,7 +221,9 @@ Output was: %s
 Error: %v
 Return JSON only.`, text, resp.Text, err)
 
+		stopTyping := startTyping(ctx, adapter, msg.SenderID)
 		repairResp, rErr := codexClient.Exec(ctx, state.ID, state.Dir, repairPrompt, false)
+		stopTyping()
 		if rErr == nil {
 			if err2 := json.Unmarshal([]byte(repairResp.Text), &agentResp); err2 == nil {
 				log.Println("repair successful")
@@ -245,7 +251,9 @@ Return JSON only.`, text, resp.Text, err)
 You must fix the JSON. Allowed actions: act_now, schedule, ask, defer.
 Return JSON only.`, err)
 
+			stopTyping := startTyping(ctx, adapter, msg.SenderID)
 			repairResp, rErr := codexClient.Exec(ctx, state.ID, state.Dir, repairPrompt, false)
+			stopTyping()
 			if rErr == nil {
 				// We expect a full JSON response again
 				if err2 := json.Unmarshal([]byte(repairResp.Text), &agentResp); err2 == nil {
@@ -282,11 +290,42 @@ Return JSON only.`, err)
 	}
 }
 
+func startTyping(ctx context.Context, adapter adapters.Adapter, target string) func() {
+	ta, ok := adapter.(adapters.TypingSender)
+	if !ok {
+		return func() {}
+	}
+	typingCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		_ = ta.SendTyping(typingCtx, target)
+		for {
+			select {
+			case <-typingCtx.Done():
+				return
+			case <-ticker.C:
+				_ = ta.SendTyping(typingCtx, target)
+			}
+		}
+	}()
+	return cancel
+}
+
 func executePacket(ctx context.Context, packet *ir.Packet, registry *tools.Registry, adapter adapters.Adapter, targetID string) {
+	if len(packet.Tools) > 0 {
+		_ = sendStatus(ctx, adapter, targetID, fmt.Sprintf("Status: iniciando %d tool(s)...", len(packet.Tools)))
+	}
+	type toolResult struct {
+		name string
+		err  error
+	}
+	results := make([]toolResult, 0, len(packet.Tools))
 	for _, req := range packet.Tools {
 		tool := registry.Get(req.Name)
 		if tool == nil {
 			log.Printf("tool not found: %s", req.Name)
+			results = append(results, toolResult{name: req.Name, err: fmt.Errorf("tool not found")})
 			continue
 		}
 
@@ -311,7 +350,27 @@ func executePacket(ctx context.Context, packet *ir.Packet, registry *tools.Regis
 			log.Printf("tool %s success: %s", req.Name, res.Output)
 			// Optionally notify user of success if verbose
 		}
+		results = append(results, toolResult{name: req.Name, err: err})
 	}
+	if len(results) == 0 {
+		return
+	}
+	var okCount, failCount int
+	details := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.err != nil {
+			failCount++
+			details = append(details, fmt.Sprintf("%s falhou", r.name))
+		} else {
+			okCount++
+			details = append(details, fmt.Sprintf("%s ok", r.name))
+		}
+	}
+	summary := fmt.Sprintf("Status: concluído. Sucesso: %d, Falhas: %d.", okCount, failCount)
+	if len(details) > 0 {
+		summary += " Detalhes: " + strings.Join(details, "; ") + "."
+	}
+	_ = sendStatus(ctx, adapter, targetID, summary)
 }
 
 func sessionReset(ctx context.Context, s *store.SessionStore, key string, adapter adapters.Adapter, sender string) error {
@@ -368,4 +427,8 @@ func parseDirCommand(text string) (string, string, bool) {
 		rest = strings.TrimSpace(parts[1])
 	}
 	return dir, rest, true
+}
+
+func sendStatus(ctx context.Context, adapter adapters.Adapter, target string, text string) error {
+	return adapter.Send(ctx, target, text)
 }

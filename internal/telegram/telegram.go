@@ -89,6 +89,24 @@ func (a *Adapter) Send(ctx context.Context, target string, text string) error {
 	return nil
 }
 
+func (a *Adapter) SendTyping(ctx context.Context, target string) error {
+	chatID, err := strconv.ParseInt(target, 10, 64)
+	if err != nil {
+		return err
+	}
+	action := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+	_, err = a.bot.Send(action)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
 func chunkText(text string, size int) []string {
 	if len(text) <= size {
 		return []string{text}

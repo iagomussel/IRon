@@ -17,7 +17,13 @@ func NewNotesTool(dataDir string) *NotesTool {
 	return &NotesTool{DataDir: dataDir}
 }
 
-func (t *NotesTool) Name() string { return "notes_append" }
+func (t *NotesTool) Name() string {
+	return "notes_append"
+}
+
+func (t *NotesTool) Description() string {
+	return "Append a note to a specific section/file. Args: section, content."
+}
 
 type NotesInput struct {
 	Content string `json:"content"`

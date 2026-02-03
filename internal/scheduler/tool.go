@@ -25,6 +25,10 @@ func (t *Tool) Name() string {
 	return "schedule"
 }
 
+func (t *Tool) Description() string {
+	return "Schedule a one-off reminder or message. Args: spec (duration/rfc3339), message, target."
+}
+
 type Input struct {
 	Spec    string `json:"spec"`    // Date time (RFC3339), Duration (e.g. 30m), or Cron
 	When    string `json:"when"`    // Alias for Spec, often hallucinated by LLM
@@ -134,6 +138,10 @@ func NewScheduleJobTool(s *Scheduler) *ScheduleJobTool {
 }
 
 func (t *ScheduleJobTool) Name() string { return "schedule_job" }
+
+func (t *ScheduleJobTool) Description() string {
+	return "Schedule a recurring job or complex task (cron). Modes: Tool-only, LLM-only, Hybrid."
+}
 
 type JobInput struct {
 	Name    string           `json:"name"`

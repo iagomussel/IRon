@@ -13,6 +13,10 @@ type Adapter interface {
 	Send(ctx context.Context, target string, text string) error
 }
 
+type TypingSender interface {
+	SendTyping(ctx context.Context, target string) error
+}
+
 type Registry struct {
 	adapters map[string]Adapter
 }

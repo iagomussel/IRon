@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 type Tool interface {
 	Name() string
+	Description() string
 	Run(ctx context.Context, input json.RawMessage) (Result, error)
 }
 
@@ -91,17 +93,39 @@ func (r *Registry) Get(name string) Tool {
 	return bestMatch
 }
 
-func (r *Registry) List() []string {
+func (r *Registry) List() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var list []string
-	for _, t := range r.tools {
-		list = append(list, t.Name())
+	if len(r.tools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	list := make([]Tool, 0, len(names))
+	for _, name := range names {
+		list = append(list, r.tools[name])
 	}
 	// Append aliases too? The user wants "more than one name".
 	// Maybe aliases confuse the list?
 	// Let's just list canonical tools.
 	return list
+}
+
+func (r *Registry) ListNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.tools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func DefaultRegistry() *Registry {
@@ -133,7 +157,8 @@ type HTTPFetchInput struct {
 
 type HTTPFetchTool struct{}
 
-func (t *HTTPFetchTool) Name() string { return "http_fetch" }
+func (t *HTTPFetchTool) Name() string        { return "http_fetch" }
+func (t *HTTPFetchTool) Description() string { return "Fetch content from a URL via HTTP GET." }
 
 func (t *HTTPFetchTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	var in HTTPFetchInput
@@ -172,18 +197,28 @@ func (t *HTTPFetchTool) Run(ctx context.Context, input json.RawMessage) (Result,
 
 type ShellExecInput struct {
 	Command    []string `json:"command"`
+	Cmd        string   `json:"cmd"` // Flexible alias for LLM
 	TimeoutSec int      `json:"timeout_sec"`
 }
 
 type ShellExecTool struct{}
 
 func (t *ShellExecTool) Name() string { return "shell_exec" }
+func (t *ShellExecTool) Description() string {
+	return "Execute a shell command (bash) and return output. Args: command=[]string or cmd=string."
+}
 
 func (t *ShellExecTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	var in ShellExecInput
 	if err := json.Unmarshal(input, &in); err != nil {
 		return Result{Error: err.Error()}, err
 	}
+	// Normalization: map Cmd -> Command if Command is empty
+	if len(in.Command) == 0 && in.Cmd != "" {
+		// Use bash -c to handle complex strings
+		in.Command = []string{"bash", "-c", in.Cmd}
+	}
+
 	if len(in.Command) == 0 {
 		return Result{Error: "command is required"}, errors.New("command is required")
 	}
@@ -207,7 +242,8 @@ type DockerExecInput struct {
 
 type DockerExecTool struct{}
 
-func (t *DockerExecTool) Name() string { return "docker_exec" }
+func (t *DockerExecTool) Name() string        { return "docker_exec" }
+func (t *DockerExecTool) Description() string { return "Execute a command inside a docker container." }
 
 func (t *DockerExecTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	var in DockerExecInput
@@ -237,7 +273,8 @@ type CodeExecInput struct {
 
 type CodeExecTool struct{}
 
-func (t *CodeExecTool) Name() string { return "code_exec" }
+func (t *CodeExecTool) Name() string        { return "code_exec" }
+func (t *CodeExecTool) Description() string { return "Execute code in a sandbox (python/bash/go)." }
 
 func (t *CodeExecTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	var in CodeExecInput
@@ -327,6 +364,9 @@ type ExternalTool struct {
 }
 
 func (t *ExternalTool) Name() string { return t.ToolName }
+func (t *ExternalTool) Description() string {
+	return fmt.Sprintf("External executable: %s", t.ToolName)
+}
 
 func (t *ExternalTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	if len(t.Command) == 0 {
@@ -343,9 +383,14 @@ func (t *ExternalTool) Run(ctx context.Context, input json.RawMessage) (Result, 
 	return Result{Output: strings.TrimSpace(res.Stdout)}, nil
 }
 
-func FormatToolList(list []string) string {
-	if len(list) == 0 {
+func FormatToolList(tools []Tool) string {
+	if len(tools) == 0 {
 		return "no tools registered"
 	}
-	return fmt.Sprintf("tools: %s", strings.Join(list, ", "))
+	var sb strings.Builder
+	sb.WriteString("Tools:\n")
+	for _, t := range tools {
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", t.Name(), t.Description()))
+	}
+	return sb.String()
 }

@@ -121,11 +121,18 @@ func (s *Scheduler) runTask(task config.TaskConfig) error {
 
 	// 1. Execute Tools (if any)
 	if hasTools {
+		s.sendStatus(task, fmt.Sprintf("Status: iniciando %d tool(s)...", len(task.Tools)))
+		type toolResult struct {
+			name string
+			err  error
+		}
+		results := make([]toolResult, 0, len(task.Tools))
 		for _, req := range task.Tools {
 			tool := s.tools.Get(req.Name)
 			if tool == nil {
 				log.Printf("task %s: tool not found: %s", task.ID, req.Name)
 				toolOutputs.WriteString(fmt.Sprintf("[Error] Tool %s not found\n", req.Name))
+				results = append(results, toolResult{name: req.Name, err: fmt.Errorf("tool not found")})
 				continue
 			}
 			res, err := tool.Run(context.Background(), req.Args)
@@ -133,6 +140,7 @@ func (s *Scheduler) runTask(task config.TaskConfig) error {
 			if err != nil {
 				output = fmt.Sprintf("Error: %v", err)
 			}
+			results = append(results, toolResult{name: req.Name, err: err})
 
 			// Capture output
 			toolOutputs.WriteString(fmt.Sprintf("Tool '%s' Output:\n%s\n\n", req.Name, output))
@@ -146,6 +154,24 @@ func (s *Scheduler) runTask(task config.TaskConfig) error {
 				}
 			}
 		}
+		if len(results) > 0 {
+			var okCount, failCount int
+			details := make([]string, 0, len(results))
+			for _, r := range results {
+				if r.err != nil {
+					failCount++
+					details = append(details, fmt.Sprintf("%s falhou", r.name))
+				} else {
+					okCount++
+					details = append(details, fmt.Sprintf("%s ok", r.name))
+				}
+			}
+			summary := fmt.Sprintf("Status: concluído. Sucesso: %d, Falhas: %d.", okCount, failCount)
+			if len(details) > 0 {
+				summary += " Detalhes: " + strings.Join(details, "; ") + "."
+			}
+			s.sendStatus(task, summary)
+		}
 	}
 
 	// Mode 2 & 3: LLM (with or without tool context)
@@ -155,10 +181,12 @@ func (s *Scheduler) runTask(task config.TaskConfig) error {
 			fullPrompt += "\n\n=== Context from scheduled tools ===\n" + toolOutputs.String()
 		}
 
+		s.sendStatus(task, "Status: analisando...")
 		resp, err := s.codex.Exec(context.Background(), "", "", fullPrompt, true)
 		if err != nil {
 			return err
 		}
+		s.sendStatus(task, "Status: pronto.")
 
 		adapter := s.adapters.Get(task.Adapter)
 		if adapter == nil {
@@ -172,6 +200,16 @@ func (s *Scheduler) runTask(task config.TaskConfig) error {
 	}
 
 	return nil
+}
+
+func (s *Scheduler) sendStatus(task config.TaskConfig, text string) {
+	adapter := s.adapters.Get(task.Adapter)
+	if adapter == nil {
+		return
+	}
+	for _, target := range task.Targets {
+		_ = adapter.Send(context.Background(), target, text)
+	}
 }
 
 func (s *Scheduler) AddTask(spec string, task func(), desc string) (cron.EntryID, error) {

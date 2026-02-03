@@ -1,0 +1,15 @@
+[Unit]
+Description=IRon Telegram Orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/bin/IRon
+ExecStart=/usr/bin/IRon
+Restart=always
+RestartSec=2
+Environment=DATA_DIR=/usr/bin/IRon
+
+[Install]
+WantedBy=multi-user.target

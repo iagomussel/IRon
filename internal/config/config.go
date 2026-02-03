@@ -1,6 +1,7 @@
 package config
 
 import (
+	"agentic/internal/ir"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,12 +10,13 @@ import (
 )
 
 type TaskConfig struct {
-	ID         string   `json:"id"`
-	Cron       string   `json:"cron"`
-	Prompt     string   `json:"prompt"`
-	SessionKey string   `json:"session_key"`
-	Adapter    string   `json:"adapter"`
-	Targets    []string `json:"targets"`
+	ID         string           `json:"id"`
+	Cron       string           `json:"cron"`
+	Prompt     string           `json:"prompt"`
+	Tools      []ir.ToolRequest `json:"tools,omitempty"`
+	SessionKey string           `json:"session_key"`
+	Adapter    string           `json:"adapter"`
+	Targets    []string         `json:"targets"`
 }
 
 type AddonConfig struct {

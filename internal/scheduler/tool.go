@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"agentic/internal/config"
+	"agentic/internal/ir"
 	"agentic/internal/tools"
 )
 
@@ -79,4 +81,64 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 	}
 
 	return tools.Result{Output: fmt.Sprintf("Scheduled recurring task: %s", in.Spec)}, nil
+}
+
+// New Job DSL Tool
+
+type ScheduleJobTool struct {
+	scheduler *Scheduler
+}
+
+func NewScheduleJobTool(s *Scheduler) *ScheduleJobTool {
+	return &ScheduleJobTool{scheduler: s}
+}
+
+func (t *ScheduleJobTool) Name() string { return "schedule_job" }
+
+type JobInput struct {
+	Name    string           `json:"name"`
+	Cron    string           `json:"cron"`
+	Tools   []ir.ToolRequest `json:"tools"`
+	Adapter string           `json:"adapter"`
+	Target  string           `json:"target"`
+}
+
+func (t *ScheduleJobTool) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
+	var in JobInput
+	if err := json.Unmarshal(input, &in); err != nil {
+		return tools.Result{Error: err.Error()}, err
+	}
+
+	if in.Name == "" {
+		return tools.Result{Error: "name is required"}, fmt.Errorf("name is required")
+	}
+	if in.Cron == "" {
+		return tools.Result{Error: "cron is required"}, fmt.Errorf("cron is required")
+	}
+	if len(in.Tools) == 0 {
+		return tools.Result{Error: "tools are required"}, fmt.Errorf("tools are required")
+	}
+	if in.Adapter == "" {
+		in.Adapter = "telegram"
+	}
+	if in.Target == "" {
+		// Try to infer target from context?
+		// Ideally pass target in args, but robust code checks.
+		// For now fail.
+		return tools.Result{Error: "target is required"}, fmt.Errorf("target is required")
+	}
+
+	task := config.TaskConfig{
+		ID:      in.Name,
+		Cron:    in.Cron,
+		Tools:   in.Tools,
+		Adapter: in.Adapter,
+		Targets: []string{in.Target},
+	}
+
+	if err := t.scheduler.AddPersistentJob(task); err != nil {
+		return tools.Result{Error: "failed to schedule job: " + err.Error()}, err
+	}
+
+	return tools.Result{Output: fmt.Sprintf("Job '%s' scheduled @ %s", in.Name, in.Cron)}, nil
 }

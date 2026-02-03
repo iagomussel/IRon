@@ -53,14 +53,19 @@ func main() {
 		adapterRegistry.Register(tg)
 	}
 
-	sched := scheduler.New(codexClient, adapterRegistry, cfg.DataDir)
+	toolRegistry := tools.DefaultRegistry()
+
+	sched := scheduler.New(codexClient, adapterRegistry, toolRegistry, cfg.DataDir)
 	if err := sched.RegisterTasks(cfg.Tasks); err != nil {
 		log.Fatalf("scheduler: %v", err)
 	}
 
-	toolRegistry := tools.DefaultRegistry()
 	toolRegistry.Register(scheduler.NewTool(sched))
+	toolRegistry.Register(scheduler.NewScheduleJobTool(sched))
 	toolRegistry.Register(tools.NewNotesTool(cfg.DataDir))
+	toolRegistry.Register(&tools.ListAddTool{BaseDir: cfg.DataDir})
+	toolRegistry.Register(&tools.ListRemoveTool{BaseDir: cfg.DataDir})
+	toolRegistry.Register(&tools.ListShowTool{BaseDir: cfg.DataDir})
 
 	addonMgr := addons.New("addons")
 	if err := addonMgr.Load(ctx, cfg.Addons, toolRegistry, adapterRegistry); err != nil {
@@ -147,7 +152,7 @@ func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.A
 	}
 
 	// 2. LLM: Gateway
-	useLast := state.UseLast && state.ID != ""
+	useLast := state.UseLast
 	promptContext := ""
 	if !useLast {
 		// Load system prompt + metadata
@@ -158,13 +163,18 @@ func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.A
 	}
 
 	fullPrompt := promptContext + text
-	resp, err := codexClient.Exec(ctx, state.Dir, fullPrompt, useLast)
+	resp, err := codexClient.Exec(ctx, state.ID, state.Dir, fullPrompt, useLast)
 	if err != nil {
 		_ = adapter.Send(ctx, msg.SenderID, "LLM Error: "+err.Error())
 		return
 	}
 
 	// Update session state
+	if resp.SessionID != "" && resp.SessionID != state.ID {
+		_ = sessions.SetSessionID(sessionKey, resp.SessionID)
+		// Update local state copy for potential immediate reuse (e.g. repair)
+		state.ID = resp.SessionID
+	}
 	if resp.NewDir != "" && resp.NewDir != state.Dir {
 		_ = sessions.SetDir(sessionKey, resp.NewDir)
 	}
@@ -181,7 +191,7 @@ Output was: %s
 Error: %v
 Return JSON only.`, text, resp.Text, err)
 
-		repairResp, rErr := codexClient.Exec(ctx, state.Dir, repairPrompt, false)
+		repairResp, rErr := codexClient.Exec(ctx, state.ID, state.Dir, repairPrompt, false)
 		if rErr == nil {
 			if err2 := json.Unmarshal([]byte(repairResp.Text), &agentResp); err2 == nil {
 				log.Println("repair successful")
@@ -202,9 +212,35 @@ Return JSON only.`, text, resp.Text, err)
 	if agentResp.IR != nil {
 		// Validate
 		if err := agentResp.IR.Validate(); err != nil {
-			log.Printf("ir validation failed: %v", err)
-			return
+			log.Printf("ir validation failed: %v. attempting repair...", err)
+
+			// Repair prompt for semantic errors
+			repairPrompt := fmt.Sprintf(`System: IR validation failed: %v. 
+You must fix the JSON. Allowed actions: act_now, schedule, ask, defer.
+Return JSON only.`, err)
+
+			repairResp, rErr := codexClient.Exec(ctx, state.ID, state.Dir, repairPrompt, false)
+			if rErr == nil {
+				// We expect a full JSON response again
+				if err2 := json.Unmarshal([]byte(repairResp.Text), &agentResp); err2 == nil {
+					// Re-validate
+					if err3 := agentResp.IR.Validate(); err3 == nil {
+						log.Println("semantic repair successful")
+					} else {
+						log.Printf("semantic repair failed: %v", err3)
+						_ = adapter.Send(ctx, msg.SenderID, "Critical error: Agent produced invalid action twice.")
+						return
+					}
+				} else {
+					log.Printf("semantic repair json parse failed: %v", err2)
+					return
+				}
+			} else {
+				log.Printf("semantic repair exec failed: %v", rErr)
+				return
+			}
 		}
+
 		executePacket(ctx, agentResp.IR, toolRegistry, adapter, msg.SenderID)
 	}
 }
@@ -217,9 +253,18 @@ func executePacket(ctx context.Context, packet *ir.Packet, registry *tools.Regis
 			continue
 		}
 
-		// Inject target if missing/needed for specific tools?
-		// For now we assume the LLM put the right args or the tool logic handles it.
-		// NOTE: Scheduler tool needs "target" in args. If missing, we could inject.
+		// Inject target if missing/needed for specific tools
+		if req.Name == "schedule" || req.Name == "schedule_job" {
+			var argsMap map[string]interface{}
+			if err := json.Unmarshal(req.Args, &argsMap); err == nil {
+				if _, ok := argsMap["target"]; !ok {
+					argsMap["target"] = targetID
+					if newArgs, err := json.Marshal(argsMap); err == nil {
+						req.Args = newArgs
+					}
+				}
+			}
+		}
 
 		res, err := tool.Run(ctx, req.Args)
 		if err != nil {
@@ -227,8 +272,7 @@ func executePacket(ctx context.Context, packet *ir.Packet, registry *tools.Regis
 			_ = adapter.Send(ctx, targetID, fmt.Sprintf("[System] Tool error %s: %v", req.Name, err))
 		} else {
 			log.Printf("tool %s success: %s", req.Name, res.Output)
-			// Optionally notify user of success if verbose?
-			// Protocol says "Never output long explanations", so rely on "reply" unless critical.
+			// Optionally notify user of success if verbose
 		}
 	}
 }
@@ -262,7 +306,7 @@ func handleShell(ctx context.Context, text, currentDir string, adapter adapters.
 			output += "\nwd: " + newDir
 		}
 	}
-	_ = adapter.Send(ctx, sender, "```\n"+output+"\n```")
+	_ = adapter.Send(ctx, sender, output)
 }
 
 func parseDirCommand(text string) (string, string, bool) {

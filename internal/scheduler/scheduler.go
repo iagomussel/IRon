@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"agentic/internal/adapters"
 	"agentic/internal/codex"
 	"agentic/internal/config"
+
+	"agentic/internal/tools"
 
 	"github.com/robfig/cron/v3"
 )
@@ -65,15 +68,17 @@ type Scheduler struct {
 	cron     *cron.Cron
 	codex    *codex.Client
 	adapters *adapters.Registry
+	tools    *tools.Registry
 	store    JobStore
 }
 
-func New(codexClient *codex.Client, adaptersReg *adapters.Registry, dataDir string) *Scheduler {
+func New(codexClient *codex.Client, adaptersReg *adapters.Registry, toolsReg *tools.Registry, dataDir string) *Scheduler {
 	// Standard parser (Minute Hour Dom Month Dow)
 	s := &Scheduler{
 		cron:     cron.New(),
 		codex:    codexClient,
 		adapters: adaptersReg,
+		tools:    toolsReg,
 		store:    NewFileJobStore(dataDir),
 	}
 
@@ -109,7 +114,32 @@ func (s *Scheduler) RegisterTasks(tasks []config.TaskConfig) error {
 }
 
 func (s *Scheduler) runTask(task config.TaskConfig) error {
-	resp, err := s.codex.Exec(context.Background(), "", task.Prompt, true)
+	// 1. Tool-based Job (Fast, Cheap)
+	if len(task.Tools) > 0 {
+		for _, req := range task.Tools {
+			tool := s.tools.Get(req.Name)
+			if tool == nil {
+				log.Printf("task %s: tool not found: %s", task.ID, req.Name)
+				continue
+			}
+			res, err := tool.Run(context.Background(), req.Args)
+			output := res.Output
+			if err != nil {
+				output = fmt.Sprintf("Error: %v", err)
+			}
+
+			// Send output to targets
+			if adapter := s.adapters.Get(task.Adapter); adapter != nil {
+				for _, target := range task.Targets {
+					_ = adapter.Send(context.Background(), target, fmt.Sprintf("[%s] %s", req.Name, output))
+				}
+			}
+		}
+		return nil
+	}
+
+	// 2. LLM-based Job (Slow, Expensive)
+	resp, err := s.codex.Exec(context.Background(), "", "", task.Prompt, true)
 	if err != nil {
 		return err
 	}

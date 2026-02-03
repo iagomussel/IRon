@@ -17,6 +17,7 @@ Rules:
   - Mode 1 (Tool-only): Set 'tools', leave 'prompt' empty. Output sent directly.
   - Mode 2 (LLM-only): Set 'prompt', leave 'tools' empty. Generic agent task.
   - Mode 3 (Hybrid): Set 'tools' AND 'prompt'. Tools run first, output fed to Prompt for analysis.
+- Tools: shell, schedule, schedule_job, notes_append, list_add, list_remove, list_show.
 - If you need missing info: action="ask" and ask ONE question.
 - For code generation: NEVER output code. Output BlueprintDSL inside a tool call:
   tools: [{name:"blueprint_apply", args:{dsl:"..."}}]

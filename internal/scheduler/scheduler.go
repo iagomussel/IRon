@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +12,8 @@ import (
 	"agentic/internal/adapters"
 	"agentic/internal/codex"
 	"agentic/internal/config"
-
+	"agentic/internal/db"
+	"agentic/internal/ir"
 	"agentic/internal/tools"
 
 	"github.com/robfig/cron/v3"
@@ -25,44 +24,39 @@ type JobStore interface {
 	List() ([]config.TaskConfig, error)
 }
 
-type FileJobStore struct {
-	path string
-	mu   sync.Mutex
+type SQLiteJobStore struct {
+	db *db.DB
 }
 
-func NewFileJobStore(dir string) *FileJobStore {
-	return &FileJobStore{path: filepath.Join(dir, "jobs.json")}
+func NewSQLiteJobStore(d *db.DB) *SQLiteJobStore {
+	return &SQLiteJobStore{db: d}
 }
 
-func (s *FileJobStore) Add(task config.TaskConfig) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tasks, _ := s.List()
-	tasks = append(tasks, task)
-	return s.save(tasks)
+func (s *SQLiteJobStore) Add(task config.TaskConfig) error {
+	toolsJSON, _ := json.Marshal(task.Tools)
+	// We don't have a description field in TaskConfig yet, defaulting to ""
+	return s.db.AddJob(task.ID, task.Cron, string(toolsJSON), task.Prompt, task.Adapter, task.Targets[0], "")
 }
 
-func (s *FileJobStore) List() ([]config.TaskConfig, error) {
-	data, err := os.ReadFile(s.path)
+func (s *SQLiteJobStore) List() ([]config.TaskConfig, error) {
+	jobs, err := s.db.ListJobs()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return []config.TaskConfig{}, nil
-		}
 		return nil, err
 	}
 	var tasks []config.TaskConfig
-	if err := json.Unmarshal(data, &tasks); err != nil {
-		return nil, err
+	for _, j := range jobs {
+		var toolsReq []ir.ToolRequest
+		_ = json.Unmarshal([]byte(j.ToolsJSON), &toolsReq)
+		tasks = append(tasks, config.TaskConfig{
+			ID:      j.ID,
+			Cron:    j.Cron,
+			Tools:   toolsReq,
+			Prompt:  j.Prompt,
+			Adapter: j.Adapter,
+			Targets: []string{j.Target},
+		})
 	}
 	return tasks, nil
-}
-
-func (s *FileJobStore) save(tasks []config.TaskConfig) error {
-	data, err := json.MarshalIndent(tasks, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.path, data, 0644)
 }
 
 type Scheduler struct {
@@ -71,16 +65,22 @@ type Scheduler struct {
 	adapters *adapters.Registry
 	tools    *tools.Registry
 	store    JobStore
+
+	mu         sync.Mutex
+	memCron    map[cron.EntryID]string
+	memOneShot map[string]string
 }
 
-func New(codexClient *codex.Client, adaptersReg *adapters.Registry, toolsReg *tools.Registry, dataDir string) *Scheduler {
+func New(codexClient *codex.Client, adaptersReg *adapters.Registry, toolsReg *tools.Registry, database *db.DB) *Scheduler {
 	// Standard parser (Minute Hour Dom Month Dow)
 	s := &Scheduler{
-		cron:     cron.New(),
-		codex:    codexClient,
-		adapters: adaptersReg,
-		tools:    toolsReg,
-		store:    NewFileJobStore(dataDir),
+		cron:       cron.New(),
+		codex:      codexClient,
+		adapters:   adaptersReg,
+		tools:      toolsReg,
+		store:      NewSQLiteJobStore(database),
+		memCron:    make(map[cron.EntryID]string),
+		memOneShot: make(map[string]string),
 	}
 
 	// Load persisted tasks
@@ -174,12 +174,28 @@ func (s *Scheduler) runTask(task config.TaskConfig) error {
 	return nil
 }
 
-func (s *Scheduler) AddTask(spec string, task func()) (cron.EntryID, error) {
-	return s.cron.AddFunc(spec, task)
+func (s *Scheduler) AddTask(spec string, task func(), desc string) (cron.EntryID, error) {
+	id, err := s.cron.AddFunc(spec, task)
+	if err == nil {
+		s.mu.Lock()
+		s.memCron[id] = fmt.Sprintf("[%s] %s", spec, desc)
+		s.mu.Unlock()
+	}
+	return id, err
 }
 
-func (s *Scheduler) AddOneShot(delay time.Duration, task func()) {
-	time.AfterFunc(delay, task)
+func (s *Scheduler) AddOneShot(delay time.Duration, task func(), desc string) {
+	id := fmt.Sprintf("oneshot-%d", time.Now().UnixNano())
+	s.mu.Lock()
+	s.memOneShot[id] = fmt.Sprintf("[in %s] %s", delay, desc)
+	s.mu.Unlock()
+
+	time.AfterFunc(delay, func() {
+		task()
+		s.mu.Lock()
+		delete(s.memOneShot, id)
+		s.mu.Unlock()
+	})
 }
 
 // AddPersistentJob persists the job and schedules it
@@ -192,20 +208,32 @@ func (s *Scheduler) AddPersistentJob(task config.TaskConfig) error {
 
 // ListJobs returns a friendly list of scheduled jobs
 func (s *Scheduler) ListJobs() ([]string, error) {
+	var out []string
+
+	// 1. Persistent Tasks
 	tasks, err := s.store.List()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(tasks))
-	for _, t := range tasks {
-		desc := fmt.Sprintf("- %s: %s", t.ID, t.Cron)
-		if len(t.Tools) > 0 {
-			desc += fmt.Sprintf(" (tools: %d)", len(t.Tools))
-		} else {
-			desc += " (LLM)"
+	if err == nil {
+		for _, t := range tasks {
+			desc := fmt.Sprintf("- [Persistent] %s: %s", t.ID, t.Cron)
+			out = append(out, desc)
 		}
-		out = append(out, desc)
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 2. Memory Cron
+	for id, desc := range s.memCron {
+		if s.cron.Entry(id).Valid() {
+			out = append(out, fmt.Sprintf("- [Cron] %s", desc))
+		}
+	}
+
+	// 3. Memory OneShot
+	for _, desc := range s.memOneShot {
+		out = append(out, fmt.Sprintf("- [OneShot] %s", desc))
+	}
+
 	if len(out) == 0 {
 		return []string{"No known scheduled jobs."}, nil
 	}

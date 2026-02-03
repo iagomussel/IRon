@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"agentic/internal/addons"
 	"agentic/internal/codex"
 	"agentic/internal/config"
+	"agentic/internal/db"
 	"agentic/internal/executil"
 	"agentic/internal/ir"
 	"agentic/internal/router"
@@ -55,17 +57,41 @@ func main() {
 
 	toolRegistry := tools.DefaultRegistry()
 
-	sched := scheduler.New(codexClient, adapterRegistry, toolRegistry, cfg.DataDir)
+	database, err := db.New(filepath.Join(cfg.DataDir, "agent.db"))
+	if err != nil {
+		log.Fatalf("db init: %v", err)
+	}
+	defer database.Close()
+
+	sched := scheduler.New(codexClient, adapterRegistry, toolRegistry, database)
 	if err := sched.RegisterTasks(cfg.Tasks); err != nil {
 		log.Fatalf("scheduler: %v", err)
 	}
 
 	toolRegistry.Register(scheduler.NewTool(sched))
+	toolRegistry.RegisterAlias("remind", "schedule")
+	toolRegistry.RegisterAlias("timer", "schedule")
+
 	toolRegistry.Register(scheduler.NewScheduleJobTool(sched))
+	toolRegistry.RegisterAlias("cron", "schedule_job")
+	toolRegistry.RegisterAlias("job", "schedule_job")
+	toolRegistry.RegisterAlias("task", "schedule_job")
+
 	toolRegistry.Register(tools.NewNotesTool(cfg.DataDir))
+	toolRegistry.RegisterAlias("note", "notes_append")
+	toolRegistry.RegisterAlias("notes", "notes_append")
+	toolRegistry.RegisterAlias("write_note", "notes_append")
+
 	toolRegistry.Register(&tools.ListAddTool{BaseDir: cfg.DataDir})
+	toolRegistry.RegisterAlias("list", "list_add") // ambiguous but 'list' implies adding often? or showing? 'list' command usually handled by router. But for tool call, list_add is safer default for 'list'.
+	toolRegistry.RegisterAlias("add_list", "list_add")
+
 	toolRegistry.Register(&tools.ListRemoveTool{BaseDir: cfg.DataDir})
+	toolRegistry.RegisterAlias("remove_list", "list_remove")
+
 	toolRegistry.Register(&tools.ListShowTool{BaseDir: cfg.DataDir})
+	toolRegistry.RegisterAlias("show_list", "list_show")
+	toolRegistry.RegisterAlias("get_list", "list_show")
 
 	addonMgr := addons.New("addons")
 	if err := addonMgr.Load(ctx, cfg.Addons, toolRegistry, adapterRegistry); err != nil {
@@ -88,7 +114,7 @@ func main() {
 		return
 	}
 	if err := adapter.Start(ctx, func(msg adapters.Message) {
-		handleMessage(ctx, msg, adapter, codexClient, toolRegistry, sessionStore, sched)
+		go handleMessage(ctx, msg, adapter, codexClient, toolRegistry, sessionStore, sched)
 	}); err != nil {
 		log.Fatalf("adapter start: %v", err)
 	}

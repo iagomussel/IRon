@@ -69,7 +69,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 			if err := adp.Send(context.Background(), in.Target, msg); err != nil {
 				log.Printf("error sending scheduled message: %v", err)
 			}
-		})
+		}, in.Message)
 		return tools.Result{Output: fmt.Sprintf("Scheduled one-shot task in %s", d)}, nil
 	}
 
@@ -97,7 +97,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 			if err := adp.Send(context.Background(), in.Target, msg); err != nil {
 				log.Printf("error sending scheduled message: %v", err)
 			}
-		})
+		}, in.Message)
 		return tools.Result{Output: fmt.Sprintf("Scheduled one-shot task at %s%s", ts, note)}, nil
 	}
 
@@ -115,7 +115,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		if err := adp.Send(context.Background(), in.Target, msg); err != nil {
 			log.Printf("error sending scheduled message: %v", err)
 		}
-	})
+	}, in.Message)
 	if err != nil {
 		return tools.Result{Error: "invalid schedule spec: " + err.Error()}, err
 	}

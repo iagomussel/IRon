@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"agentic/internal/executil"
@@ -27,27 +28,100 @@ type Result struct {
 }
 
 type Registry struct {
-	tools map[string]Tool
+	tools   map[string]Tool
+	aliases map[string]string
+	mu      sync.RWMutex
 }
 
 func NewRegistry() *Registry {
-	return &Registry{tools: map[string]Tool{}}
+	return &Registry{
+		tools:   make(map[string]Tool),
+		aliases: make(map[string]string),
+	}
 }
 
-func (r *Registry) Register(tool Tool) {
-	r.tools[tool.Name()] = tool
+func (r *Registry) Register(t Tool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[strings.ToLower(t.Name())] = t
+}
+
+func (r *Registry) RegisterAlias(alias, target string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.aliases[strings.ToLower(alias)] = strings.ToLower(target)
 }
 
 func (r *Registry) Get(name string) Tool {
-	return r.tools[name]
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	name = strings.ToLower(name)
+
+	// 1. Exact match
+	if t, ok := r.tools[name]; ok {
+		return t
+	}
+
+	// 2. Alias match
+	if target, ok := r.aliases[name]; ok {
+		if t, ok := r.tools[target]; ok {
+			return t
+		}
+	}
+
+	// 3. Similarity / Fuzzy match
+	// If the requested name is a significant substring of a real tool (e.g. "shell" in "shell_exec")
+	// or vice versa, we might accept it.
+	var bestMatch Tool
+	// var bestLen int // This variable was declared but not used in the provided snippet.
+
+	for tName, tool := range r.tools {
+		// Contains check: "shell" in "shell_exec"
+		if strings.Contains(tName, name) {
+			// Prefer shorter "delta"? No, just return first valid?
+			// Let's return matches where name is prefix or suffix mostly
+			return tool
+		}
+		// "shell_execution" (user) vs "shell_exec" (tool) -> "shell_exec" in "shell_execution"
+		if strings.Contains(name, tName) {
+			return tool
+		}
+	}
+
+	return bestMatch
 }
 
 func (r *Registry) List() []string {
-	out := make([]string, 0, len(r.tools))
-	for name := range r.tools {
-		out = append(out, name)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var list []string
+	for _, t := range r.tools {
+		list = append(list, t.Name())
 	}
-	return out
+	// Append aliases too? The user wants "more than one name".
+	// Maybe aliases confuse the list?
+	// Let's just list canonical tools.
+	return list
+}
+
+func DefaultRegistry() *Registry {
+	r := NewRegistry()
+	r.Register(&HTTPFetchTool{})
+	r.RegisterAlias("fetch", "http_fetch")
+	r.RegisterAlias("http", "http_fetch")
+	r.RegisterAlias("curl", "http_fetch")
+
+	r.Register(&ShellExecTool{})
+	r.RegisterAlias("shell", "shell_exec")
+	r.RegisterAlias("cmd", "shell_exec")
+
+	r.Register(&DockerExecTool{})
+	r.RegisterAlias("docker", "docker_exec")
+
+	r.Register(&CodeExecTool{})
+	r.RegisterAlias("code", "code_exec")
+	r.RegisterAlias("run_code", "code_exec")
+	return r
 }
 
 type HTTPFetchInput struct {
@@ -267,15 +341,6 @@ func (t *ExternalTool) Run(ctx context.Context, input json.RawMessage) (Result, 
 		return out, nil
 	}
 	return Result{Output: strings.TrimSpace(res.Stdout)}, nil
-}
-
-func DefaultRegistry() *Registry {
-	r := NewRegistry()
-	r.Register(&HTTPFetchTool{})
-	r.Register(&ShellExecTool{})
-	r.Register(&DockerExecTool{})
-	r.Register(&CodeExecTool{})
-	return r
 }
 
 func FormatToolList(list []string) string {

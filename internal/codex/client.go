@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,9 +23,13 @@ type Response struct {
 	Text   string
 	Stderr string
 	Code   int
+	NewDir string
 }
 
-// Exec executa o comando codex. O parâmetro useLast ativa o modo 'resume --last'
+// Regex para capturar diretórios em logs de ferramentas (ex: "in /path/to/dir succeeded")
+var dirRegex = regexp.MustCompile(`(?i)in\s+([~/][^\s]+)\s+succeeded`)
+
+// Exec executa o comando codex.
 func (c *Client) Exec(ctx context.Context, cwd string, prompt string, useLast bool) (Response, error) {
 	if len(c.Command) == 0 {
 		return Response{}, errors.New("codex command not configured")
@@ -33,27 +38,46 @@ func (c *Client) Exec(ctx context.Context, cwd string, prompt string, useLast bo
 	name := c.Command[0]
 	args := c.prepareArgs(useLast)
 
-	log.Printf("codex exec: %s %s", name, strings.Join(args, " "))
+	log.Printf("codex exec: %s %s (cwd: %s)", name, strings.Join(args, " "), cwd)
 
-	res, err := executil.Run(ctx, name, args, []byte(prompt), c.Env, c.Timeout, normalizeCwd(cwd))
+	res, err := executil.Run(ctx, name, args, []byte(prompt), c.Env, c.Timeout, NormalizeCwd(cwd))
 
-	stdout := strings.TrimSpace(res.Stdout)
-	stderr := strings.TrimSpace(res.Stderr)
+	stdout := res.Stdout
+	stderr := res.Stderr
 
-	if stdout != "" {
-		log.Printf("codex stdout: %s", stdout)
+	// Tenta descobrir se o agente mudou de pasta analisando o "rastro" nos logs
+	newDir := cwd
+
+	// Procuramos tanto no stdout quanto no stderr (onde logs de ferramentas costumam ir)
+	combinedOutput := stdout + "\n" + stderr
+	matches := dirRegex.FindAllStringSubmatch(combinedOutput, -1)
+	if len(matches) > 0 {
+		// Pega o último diretório mencionado como "succeeded"
+		lastMatch := matches[len(matches)-1][1]
+		newDir = strings.TrimRight(lastMatch, ".:,") // Limpa pontuação
 	}
-	if stderr != "" {
-		log.Printf("codex stderr: %s", stderr)
+
+	stdoutClean := strings.TrimSpace(stdout)
+	stderrClean := strings.TrimSpace(stderr)
+
+	if stdoutClean != "" {
+		log.Printf("codex stdout: %s", stdoutClean)
+	}
+	if stderrClean != "" {
+		log.Printf("codex stderr: %s", stderrClean)
 	}
 
-	return Response{Text: stdout, Stderr: stderr, Code: res.Code}, err
+	return Response{
+		Text:   stdoutClean,
+		Stderr: stderrClean,
+		Code:   res.Code,
+		NewDir: newDir,
+	}, err
 }
 
 func (c *Client) prepareArgs(useLast bool) []string {
-	// Filtra placeholders antigos e prepara a base dos argumentos
-	baseArgs := make([]string, 0, len(c.Command)-1)
-	for _, arg := range c.Command[1:] {
+	baseArgs := make([]string, 0, len(c.Command))
+	for _, arg := range c.Command {
 		if arg == "{session}" || arg == "resume" || arg == "--last" {
 			continue
 		}
@@ -64,7 +88,6 @@ func (c *Client) prepareArgs(useLast bool) []string {
 		return baseArgs
 	}
 
-	// Injeta 'resume --last' antes do marcador de stdin '-' ou no final
 	for i, arg := range baseArgs {
 		if arg == "-" {
 			out := make([]string, 0, len(baseArgs)+2)
@@ -77,17 +100,27 @@ func (c *Client) prepareArgs(useLast bool) []string {
 	return append(baseArgs, "resume", "--last")
 }
 
-func normalizeCwd(cwd string) string {
+func NormalizeCwd(cwd string) string {
 	cwd = strings.TrimSpace(cwd)
-	if !strings.HasPrefix(cwd, "~") {
-		return cwd
-	}
 	home, _ := os.UserHomeDir()
-	if home == "" {
-		return cwd
+
+	var finalPath string
+	if cwd == "" || cwd == "~" || cwd == "~/" {
+		finalPath = home
+	} else if strings.HasPrefix(cwd, "~/") {
+		if home != "" {
+			finalPath = filepath.Join(home, strings.TrimPrefix(cwd, "~/"))
+		} else {
+			finalPath = cwd
+		}
+	} else {
+		finalPath = cwd
 	}
-	if cwd == "~" {
+
+	// Se o diretório não existir, fallback para a home para não travar a sessão
+	if _, err := os.Stat(finalPath); os.IsNotExist(err) {
+		log.Printf("warning: directory %s does not exist, falling back to %s", finalPath, home)
 		return home
 	}
-	return filepath.Join(home, strings.TrimPrefix(cwd, "~/"))
+	return finalPath
 }

@@ -1,75 +1,62 @@
-AGENTIC Telegram Codex Agent (Go)
+# IRon (Intermediate Representation on Telegram)
 
-Overview
-- Receives prompts from Telegram, runs codex exec with full permissions, and sends the response back.
-- Uses Codex CLI --last to resume the most recent session.
-- Exposes a tools HTTP server so Codex can call tools (http_fetch, shell_exec, docker_exec, code_exec).
-- Supports adapters and addons so you can extend behavior without editing core code.
-- Scheduler runs tasks on cron and sends results through adapters.
+IRon is a Telegram Orchestrator designed for **token efficiency** and **structured reliability**.
 
-Quick start
-1) Build
-   - Install Go 1.22+.
-   - Build: go build ./cmd/agent
+Unlike chatty chatbots that burn tokens on conversational fluff, IRon uses a strict **Dual-Output Protocol**. It forces the LLM to "think" in structured actions (IR) and "speak" in concise replies (Human Layer).
 
-2) Configure
-   - Create config.json in this folder (see example below).
+## Core Philosophy: The Token Economy
 
-3) Run
-   - ./agent
+Every token costs latency and money. To optimize this:
 
-config.json example
+1.  **Deterministic Router**: High-confidence inputs (like `/help` or `note: buy milk`) never touch the LLM. Zero cost.
+2.  **Strict IR Protocol**: The LLM outputs a single JSON block containing both the machine instruction and the human reply. No follow-up clarification loops unless explicitly requested via `action="ask"`.
+3.  **Concise Context**: We inject only relevant metadata (Time, User ID, active directory) instead of dumping massive history.
+
+## The Dual-Output Protocol
+
+Every interaction with the Intelligence Layer results in a strictly validated JSON packet:
+
+```json
 {
-  "telegram_token": "YOUR_BOT_TOKEN",
-  "allowed_chat_ids": [123456789],
-  "codex_command": ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-"],
-  "codex_env": ["CODEX_SOMETHING=1"],
-  "data_dir": "data",
-  "tools_addr": ":8089",
-  "max_response_size": 3500,
-  "tasks": [
-    {
-      "id": "daily-summary",
-      "cron": "0 9 * * *",
-      "prompt": "Resuma as prioridades do dia.",
-      "adapter": "telegram",
-      "targets": ["123456789"]
-    }
-  ],
-  "addons": [
-    {
-      "name": "my-tool",
-      "type": "tool",
-      "repo": "git@github.com:org/my-tool.git",
-      "build": ["bash", "-lc", "make build"],
-      "binary": "bin/my-tool",
-      "tool_name": "my_tool"
-    }
-  ]
+  "reply": "Scheduled for Friday at 19:00.",
+  "ir": {
+    "action": "schedule",
+    "intent": "budget.close_weekly",
+    "risk": "low",
+    "when": "5 0 * * *", 
+    "tools": [
+      {
+        "name": "schedule", 
+        "args": {
+          "spec": "30m",
+          "message": "Check budget",
+          "target": "USER_ID"
+        }
+      }
+    ],
+    "confidence": 0.95
+  }
 }
+```
 
-Environment overrides
-- TELEGRAM_TOKEN
-- TELEGRAM_ALLOWED_CHAT_IDS (comma-separated)
-- CODEX_COMMAND (string, space-separated)
-- CODEX_ENV (comma-separated)
-- DATA_DIR
-- TOOLS_ADDR
-- MAX_RESPONSE_SIZE
+*   **`reply`**: User-facing text. Short, direct, max 2 lines.
+*   **`ir`**: Machine-readable payload. Executed by the Go orchestrator.
 
-Tools server
-- GET /tools/list -> {"tools":[...]} 
-- POST /tools/execute with {"name":"tool","input":{...}}
+## Architecture
 
-Builtin tools
-- http_fetch: GET a URL
-- shell_exec: run local commands
-- docker_exec: run docker CLI
-- code_exec: run short Go/Python/Bash snippets
+*   **Router (`internal/router`)**: regex/prefix matcher for instant responses.
+*   **Orchestrator (`cmd/agent`)**: Manages the pipeline (Route -> LLM -> Validate -> Execute). It handles the "Repair Loop" if the LLM outputs broken JSON.
+*   **Scheduler (`internal/scheduler`)**: Handles time-based triggers using standard `cron` expressions or Go `time.Duration` structs. Persistent via `jobs.json`.
+*   **Tools (`internal/tools`)**: Go functions exposed to the IR layer (e.g., File I/O, Shell execution).
 
-Telegram commands
-- /tools: lists available tools
-- /help: shows help
+## BlueprintDSL
 
-Notes
-- Codex CLI handles session continuity via --last.
+For complex code generation or multi-step reasoning, we don't stream code directly to the chat. Instead, the IR contains a **BlueprintDSL**: a compact, declarative description of the intended system state.
+
+*(Future implementation: The Orchestrator will expand BlueprintDSL into actual file modifications)*
+
+## Getting Started
+
+1.  **Clone**: `git clone https://github.com/iagomussel/IRon`
+2.  **Config**: Set `TELEGRAM_TOKEN` and your LLM endpoint in `config.json`.
+3.  **Run**: `go build -o iron ./cmd/agent && ./iron`

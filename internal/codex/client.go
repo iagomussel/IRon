@@ -26,10 +26,10 @@ type Response struct {
 	NewDir string
 }
 
-// Regex para capturar diretórios em logs de ferramentas (ex: "in /path/to/dir succeeded")
+// Regex to capture directories from tool logs (e.g. "in /path/to/dir succeeded")
 var dirRegex = regexp.MustCompile(`(?i)in\s+([~/][^\s]+)\s+succeeded`)
 
-// Exec executa o comando codex.
+// Exec executes the codex command.
 func (c *Client) Exec(ctx context.Context, cwd string, prompt string, useLast bool) (Response, error) {
 	if len(c.Command) == 0 {
 		return Response{}, errors.New("codex command not configured")
@@ -45,16 +45,16 @@ func (c *Client) Exec(ctx context.Context, cwd string, prompt string, useLast bo
 	stdout := res.Stdout
 	stderr := res.Stderr
 
-	// Tenta descobrir se o agente mudou de pasta analisando o "rastro" nos logs
+	// Try to discover if the agent changed directory by analyzing the logs
 	newDir := cwd
 
-	// Procuramos tanto no stdout quanto no stderr (onde logs de ferramentas costumam ir)
+	// We search both stdout and stderr (where tool logs usually go)
 	combinedOutput := stdout + "\n" + stderr
 	matches := dirRegex.FindAllStringSubmatch(combinedOutput, -1)
 	if len(matches) > 0 {
-		// Pega o último diretório mencionado como "succeeded"
+		// Gets the last directory mentioned as "succeeded"
 		lastMatch := matches[len(matches)-1][1]
-		newDir = strings.TrimRight(lastMatch, ".:,") // Limpa pontuação
+		newDir = strings.TrimRight(lastMatch, ".:,") // Clean punctuation
 	}
 
 	stdoutClean := strings.TrimSpace(stdout)
@@ -117,7 +117,7 @@ func NormalizeCwd(cwd string) string {
 		finalPath = cwd
 	}
 
-	// Se o diretório não existir, fallback para a home para não travar a sessão
+	// If directory doesn't exist, fallback to home to prevent session lock
 	if _, err := os.Stat(finalPath); os.IsNotExist(err) {
 		log.Printf("warning: directory %s does not exist, falling back to %s", finalPath, home)
 		return home

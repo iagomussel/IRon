@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -114,12 +115,17 @@ func (s *Scheduler) RegisterTasks(tasks []config.TaskConfig) error {
 }
 
 func (s *Scheduler) runTask(task config.TaskConfig) error {
-	// 1. Tool-based Job (Fast, Cheap)
-	if len(task.Tools) > 0 {
+	var toolOutputs strings.Builder
+	hasTools := len(task.Tools) > 0
+	hasPrompt := task.Prompt != ""
+
+	// 1. Execute Tools (if any)
+	if hasTools {
 		for _, req := range task.Tools {
 			tool := s.tools.Get(req.Name)
 			if tool == nil {
 				log.Printf("task %s: tool not found: %s", task.ID, req.Name)
+				toolOutputs.WriteString(fmt.Sprintf("[Error] Tool %s not found\n", req.Name))
 				continue
 			}
 			res, err := tool.Run(context.Background(), req.Args)
@@ -128,30 +134,43 @@ func (s *Scheduler) runTask(task config.TaskConfig) error {
 				output = fmt.Sprintf("Error: %v", err)
 			}
 
-			// Send output to targets
-			if adapter := s.adapters.Get(task.Adapter); adapter != nil {
-				for _, target := range task.Targets {
-					_ = adapter.Send(context.Background(), target, fmt.Sprintf("[%s] %s", req.Name, output))
+			// Capture output
+			toolOutputs.WriteString(fmt.Sprintf("Tool '%s' Output:\n%s\n\n", req.Name, output))
+
+			// Mode 1: Tools ONLY (No Prompt) -> Send outputs immediately as they come (or batched? immediate is fine)
+			if !hasPrompt {
+				if adapter := s.adapters.Get(task.Adapter); adapter != nil {
+					for _, target := range task.Targets {
+						_ = adapter.Send(context.Background(), target, fmt.Sprintf("[%s] %s", req.Name, output))
+					}
 				}
 			}
 		}
-		return nil
 	}
 
-	// 2. LLM-based Job (Slow, Expensive)
-	resp, err := s.codex.Exec(context.Background(), "", "", task.Prompt, true)
-	if err != nil {
-		return err
-	}
-	adapter := s.adapters.Get(task.Adapter)
-	if adapter == nil {
-		return nil
-	}
-	for _, target := range task.Targets {
-		if err := adapter.Send(context.Background(), target, resp.Text); err != nil {
-			log.Printf("task %s send error: %v", task.ID, err)
+	// Mode 2 & 3: LLM (with or without tool context)
+	if hasPrompt {
+		fullPrompt := task.Prompt
+		if toolOutputs.Len() > 0 {
+			fullPrompt += "\n\n=== Context from scheduled tools ===\n" + toolOutputs.String()
+		}
+
+		resp, err := s.codex.Exec(context.Background(), "", "", fullPrompt, true)
+		if err != nil {
+			return err
+		}
+
+		adapter := s.adapters.Get(task.Adapter)
+		if adapter == nil {
+			return nil
+		}
+		for _, target := range task.Targets {
+			if err := adapter.Send(context.Background(), target, resp.Text); err != nil {
+				log.Printf("task %s send error: %v", task.ID, err)
+			}
 		}
 	}
+
 	return nil
 }
 
@@ -169,4 +188,26 @@ func (s *Scheduler) AddPersistentJob(task config.TaskConfig) error {
 		return err
 	}
 	return s.RegisterTasks([]config.TaskConfig{task})
+}
+
+// ListJobs returns a friendly list of scheduled jobs
+func (s *Scheduler) ListJobs() ([]string, error) {
+	tasks, err := s.store.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		desc := fmt.Sprintf("- %s: %s", t.ID, t.Cron)
+		if len(t.Tools) > 0 {
+			desc += fmt.Sprintf(" (tools: %d)", len(t.Tools))
+		} else {
+			desc += " (LLM)"
+		}
+		out = append(out, desc)
+	}
+	if len(out) == 0 {
+		return []string{"No known scheduled jobs."}, nil
+	}
+	return out, nil
 }

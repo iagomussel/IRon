@@ -7,10 +7,11 @@ import (
 
 // Action types
 const (
-	ActionActNow   = "act_now"
-	ActionSchedule = "schedule"
-	ActionAsk      = "ask"
-	ActionDefer    = "defer"
+	ActionActNow        = "act_now"
+	ActionSchedule      = "schedule"
+	ActionAsk           = "ask"
+	ActionDefer         = "defer"
+	ActionListReminders = "list_reminders"
 )
 
 // Risk levels
@@ -46,14 +47,14 @@ type Response struct {
 // Validate checks if the packet is valid
 func (p *Packet) Validate() error {
 	switch p.Action {
-	case ActionActNow, ActionSchedule, ActionAsk, ActionDefer:
+	case ActionActNow, ActionSchedule, ActionAsk, ActionDefer, ActionListReminders:
 		// valid
 	default:
 		return fmt.Errorf("invalid action: %s", p.Action)
 	}
 
 	switch p.Risk {
-	case RiskNone, RiskLow, RiskMedium, RiskHigh:
+	case RiskNone, RiskLow, RiskMedium, RiskHigh, "":
 		// valid
 	default:
 		return fmt.Errorf("invalid risk: %s", p.Risk)

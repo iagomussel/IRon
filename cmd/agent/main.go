@@ -88,7 +88,7 @@ func main() {
 		return
 	}
 	if err := adapter.Start(ctx, func(msg adapters.Message) {
-		handleMessage(ctx, msg, adapter, codexClient, toolRegistry, sessionStore)
+		handleMessage(ctx, msg, adapter, codexClient, toolRegistry, sessionStore, sched)
 	}); err != nil {
 		log.Fatalf("adapter start: %v", err)
 	}
@@ -100,7 +100,7 @@ func main() {
 	_ = sched.Stop(context.Background())
 }
 
-func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.Adapter, codexClient *codex.Client, toolRegistry *tools.Registry, sessions *store.SessionStore) {
+func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.Adapter, codexClient *codex.Client, toolRegistry *tools.Registry, sessions *store.SessionStore, sched *scheduler.Scheduler) {
 	text := strings.TrimSpace(msg.Text)
 	if text == "" {
 		return
@@ -239,6 +239,17 @@ Return JSON only.`, err)
 				log.Printf("semantic repair exec failed: %v", rErr)
 				return
 			}
+		}
+
+		// Handle special non-tool actions
+		if agentResp.IR.Action == ir.ActionListReminders {
+			jobs, err := sched.ListJobs()
+			if err != nil {
+				_ = adapter.Send(ctx, msg.SenderID, "Error listing jobs: "+err.Error())
+			} else {
+				_ = adapter.Send(ctx, msg.SenderID, strings.Join(jobs, "\n"))
+			}
+			return
 		}
 
 		executePacket(ctx, agentResp.IR, toolRegistry, adapter, msg.SenderID)

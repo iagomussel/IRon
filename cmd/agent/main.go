@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"agentic/internal/codex"
 	"agentic/internal/config"
 	"agentic/internal/executil"
+	"agentic/internal/ir"
+	"agentic/internal/router"
 	"agentic/internal/scheduler"
 	"agentic/internal/store"
 	"agentic/internal/telegram"
@@ -30,14 +33,18 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	toolRegistry := tools.DefaultRegistry()
-	adapterRegistry := adapters.NewRegistry()
-
 	sessionStore, err := store.NewSessionStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
 
+	codexClient := &codex.Client{
+		Command: cfg.CodexCommand,
+		Env:     cfg.CodexEnv,
+		Timeout: 20 * time.Minute,
+	}
+
+	adapterRegistry := adapters.NewRegistry()
 	if cfg.TelegramToken != "" {
 		tg, err := telegram.NewAdapter(cfg.TelegramToken, cfg.AllowedChatIDs, cfg.MaxResponseSize)
 		if err != nil {
@@ -46,15 +53,18 @@ func main() {
 		adapterRegistry.Register(tg)
 	}
 
+	sched := scheduler.New(codexClient, adapterRegistry, cfg.DataDir)
+	if err := sched.RegisterTasks(cfg.Tasks); err != nil {
+		log.Fatalf("scheduler: %v", err)
+	}
+
+	toolRegistry := tools.DefaultRegistry()
+	toolRegistry.Register(scheduler.NewTool(sched))
+	toolRegistry.Register(tools.NewNotesTool(cfg.DataDir))
+
 	addonMgr := addons.New("addons")
 	if err := addonMgr.Load(ctx, cfg.Addons, toolRegistry, adapterRegistry); err != nil {
 		log.Fatalf("addons: %v", err)
-	}
-
-	codexClient := &codex.Client{
-		Command: cfg.CodexCommand,
-		Env:     cfg.CodexEnv,
-		Timeout: 20 * time.Minute,
 	}
 
 	toolServer := &tools.Server{Registry: toolRegistry}
@@ -65,10 +75,6 @@ func main() {
 		}
 	}()
 
-	sched := scheduler.New(codexClient, adapterRegistry)
-	if err := sched.RegisterTasks(cfg.Tasks); err != nil {
-		log.Fatalf("scheduler: %v", err)
-	}
 	sched.Start()
 
 	adapter := adapterRegistry.Get("telegram")
@@ -97,10 +103,9 @@ func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.A
 
 	sessionKey := "telegram:" + msg.SenderID
 
+	// Quick commands
 	if text == "/new" {
-		_ = sessions.SetUseLast(sessionKey, false)
-		_ = sessions.SetDir(sessionKey, "")
-		_ = adapter.Send(ctx, msg.SenderID, "Sessão reiniciada.")
+		_ = sessionReset(ctx, sessions, sessionKey, adapter, msg.SenderID)
 		return
 	}
 	if text == "/tools" {
@@ -108,88 +113,156 @@ func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.A
 		return
 	}
 	if text == "/help" {
-		_ = adapter.Send(ctx, msg.SenderID, "Comandos:\n/new - Limpa sessão\n/cd <dir> - Muda pasta\n!cmd - Executa shell direto\n/tools - Lista ferramentas\n/help - Ajuda")
+		_ = adapter.Send(ctx, msg.SenderID, "Commands:\n/new - Reset session\n/cd <dir> - Change dir\n!cmd - Direct shell exec\n/tools - List tools")
 		return
 	}
 
 	state, _ := sessions.GetState(sessionKey)
-	currentDir := codex.NormalizeCwd(state.Dir) // Usando o normalizador robusto do codex
+	currentDir := codex.NormalizeCwd(state.Dir)
 
-	// EXECUÇÃO DIRETA NO SHELL (Modo !)
+	// Direct Shell Execution (!)
 	if strings.HasPrefix(text, "!") {
-		cmd := strings.TrimSpace(strings.TrimPrefix(text, "!"))
-		if cmd == "" {
-			return
-		}
-
-		log.Printf("direct shell exec: %s (cwd: %s)", cmd, currentDir)
-		res, err := executil.Run(ctx, "bash", []string{"-c", cmd}, nil, nil, 1*time.Minute, currentDir)
-
-		log.Printf("exec result: code=%d err=%v stdout=%q stderr=%q", res.Code, err, res.Stdout, res.Stderr)
-
-		if err != nil && res.Code == -1 {
-			_ = adapter.Send(ctx, msg.SenderID, "Falha ao iniciar comando: "+err.Error())
-			return
-		}
-
-		output := strings.TrimSpace(res.Stdout + "\n" + res.Stderr)
-		if output == "" {
-			output = fmt.Sprintf("(comando finalizado com código %d)", res.Code)
-		}
-
-		if strings.HasPrefix(cmd, "cd ") {
-			resPwd, _ := executil.Run(ctx, "bash", []string{"-c", cmd + " && pwd"}, nil, nil, 5*time.Second, currentDir)
-			newDir := strings.TrimSpace(resPwd.Stdout)
-			if newDir != "" && newDir != state.Dir {
-				_ = sessions.SetDir(sessionKey, newDir)
-				output += "\n\nDiretório atualizado: " + newDir
-			}
-		}
-
-		_ = adapter.Send(ctx, msg.SenderID, "```\n"+output+"\n```")
+		handleShell(ctx, text, currentDir, adapter, msg.SenderID, sessions, sessionKey, state.Dir)
 		return
 	}
 
+	// Change Directory (/cd)
 	if dir, rest, ok := parseDirCommand(text); ok {
 		_ = sessions.SetDir(sessionKey, dir)
 		if rest == "" {
-			_ = adapter.Send(ctx, msg.SenderID, "Diretório alterado para: "+dir)
+			_ = adapter.Send(ctx, msg.SenderID, "Directory changed to: "+dir)
 			return
 		}
 		text = rest
 	}
 
-	// EXECUÇÃO VIA CODEX
-	useLast := true
-	if !state.UseLast && state.ID == "" {
-		useLast = false
-	}
-
-	if !useLast {
-		if content, err := os.ReadFile("prompt.txt"); err == nil {
-			text = string(content) + "\n\n" + text
-			log.Println("system prompt injected")
-		} else {
-			log.Printf("failed to read prompt.txt: %v", err)
-		}
-	}
-
-	resp, err := codexClient.Exec(ctx, state.Dir, text, useLast)
-	if err != nil {
-		_ = adapter.Send(ctx, msg.SenderID, "Erro ao executar codex: "+err.Error())
+	// 1. ROUTER: Deterministic check
+	r := router.New()
+	if packet, ok := r.Route(text); ok {
+		log.Printf("router match: %s", packet.Intent)
+		reply := r.GenerateReply(packet)
+		_ = adapter.Send(ctx, msg.SenderID, reply)
+		executePacket(ctx, packet, toolRegistry, adapter, msg.SenderID)
 		return
 	}
 
+	// 2. LLM: Gateway
+	useLast := state.UseLast && state.ID != ""
+	promptContext := ""
+	if !useLast {
+		// Load system prompt + metadata
+		if content, err := os.ReadFile("prompt.txt"); err == nil {
+			meta := fmt.Sprintf("Current Time: %s\nUser Chat ID: %s\n\n", time.Now().Format(time.RFC3339), msg.SenderID)
+			promptContext = string(content) + "\n\n" + meta
+		}
+	}
+
+	fullPrompt := promptContext + text
+	resp, err := codexClient.Exec(ctx, state.Dir, fullPrompt, useLast)
+	if err != nil {
+		_ = adapter.Send(ctx, msg.SenderID, "LLM Error: "+err.Error())
+		return
+	}
+
+	// Update session state
 	if resp.NewDir != "" && resp.NewDir != state.Dir {
 		_ = sessions.SetDir(sessionKey, resp.NewDir)
 	}
-
 	_ = sessions.SetUseLast(sessionKey, true)
 
-	if resp.Text == "" {
-		resp.Text = "(sem resposta)"
+	// 3. PARSE & REPAIR
+	var agentResp ir.Response
+	if err := json.Unmarshal([]byte(resp.Text), &agentResp); err != nil {
+		log.Printf("json parse error: %v. attempting repair...", err)
+		// Simple repair attempt
+		repairPrompt := fmt.Sprintf(`System: You returned invalid JSON. Fix it strictly following the schema.
+Input was: %s
+Output was: %s
+Error: %v
+Return JSON only.`, text, resp.Text, err)
+
+		repairResp, rErr := codexClient.Exec(ctx, state.Dir, repairPrompt, false)
+		if rErr == nil {
+			if err2 := json.Unmarshal([]byte(repairResp.Text), &agentResp); err2 == nil {
+				log.Println("repair successful")
+			} else {
+				log.Printf("repair failed: %v", err2)
+				// Fallback to raw text if it looks like a message
+				_ = adapter.Send(ctx, msg.SenderID, resp.Text)
+				return
+			}
+		}
 	}
-	_ = adapter.Send(ctx, msg.SenderID, resp.Text)
+
+	// 4. EXECUTION
+	if agentResp.Reply != "" {
+		_ = adapter.Send(ctx, msg.SenderID, agentResp.Reply)
+	}
+
+	if agentResp.IR != nil {
+		// Validate
+		if err := agentResp.IR.Validate(); err != nil {
+			log.Printf("ir validation failed: %v", err)
+			return
+		}
+		executePacket(ctx, agentResp.IR, toolRegistry, adapter, msg.SenderID)
+	}
+}
+
+func executePacket(ctx context.Context, packet *ir.Packet, registry *tools.Registry, adapter adapters.Adapter, targetID string) {
+	for _, req := range packet.Tools {
+		tool := registry.Get(req.Name)
+		if tool == nil {
+			log.Printf("tool not found: %s", req.Name)
+			continue
+		}
+
+		// Inject target if missing/needed for specific tools?
+		// For now we assume the LLM put the right args or the tool logic handles it.
+		// NOTE: Scheduler tool needs "target" in args. If missing, we could inject.
+
+		res, err := tool.Run(ctx, req.Args)
+		if err != nil {
+			log.Printf("tool %s error: %v", req.Name, err)
+			_ = adapter.Send(ctx, targetID, fmt.Sprintf("[System] Tool error %s: %v", req.Name, err))
+		} else {
+			log.Printf("tool %s success: %s", req.Name, res.Output)
+			// Optionally notify user of success if verbose?
+			// Protocol says "Never output long explanations", so rely on "reply" unless critical.
+		}
+	}
+}
+
+func sessionReset(ctx context.Context, s *store.SessionStore, key string, adapter adapters.Adapter, sender string) error {
+	_ = s.SetUseLast(key, false)
+	_ = s.SetDir(key, "")
+	return adapter.Send(ctx, sender, "Session reset.")
+}
+
+func handleShell(ctx context.Context, text, currentDir string, adapter adapters.Adapter, sender string, s *store.SessionStore, key, stateDir string) {
+	cmd := strings.TrimSpace(strings.TrimPrefix(text, "!"))
+	if cmd == "" {
+		return
+	}
+
+	res, err := executil.Run(ctx, "bash", []string{"-c", cmd}, nil, nil, 1*time.Minute, currentDir)
+	if err != nil {
+		log.Printf("shell exec error: %v", err)
+	}
+	output := strings.TrimSpace(res.Stdout + "\n" + res.Stderr)
+	if output == "" {
+		output = fmt.Sprintf("(code %d)", res.Code)
+	}
+
+	if strings.HasPrefix(cmd, "cd ") {
+		resPwd, _ := executil.Run(ctx, "bash", []string{"-c", cmd + " && pwd"}, nil, nil, 5*time.Second, currentDir)
+		newDir := strings.TrimSpace(resPwd.Stdout)
+		if newDir != "" && newDir != stateDir {
+			_ = s.SetDir(key, newDir)
+			output += "\nwd: " + newDir
+		}
+	}
+	_ = adapter.Send(ctx, sender, "```\n"+output+"\n```")
 }
 
 func parseDirCommand(text string) (string, string, bool) {

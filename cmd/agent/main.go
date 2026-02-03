@@ -77,10 +77,21 @@ func main() {
 	toolRegistry.RegisterAlias("job", "schedule_job")
 	toolRegistry.RegisterAlias("task", "schedule_job")
 
+	toolRegistry.Register(scheduler.NewListRemindersTool(sched))
+	toolRegistry.RegisterAlias("reminders", "list_reminders")
+	toolRegistry.RegisterAlias("list_reminders", "list_reminders")
+
 	toolRegistry.Register(tools.NewNotesTool(cfg.DataDir))
 	toolRegistry.RegisterAlias("note", "notes_append")
 	toolRegistry.RegisterAlias("notes", "notes_append")
 	toolRegistry.RegisterAlias("write_note", "notes_append")
+
+	toolRegistry.Register(&tools.NotesShowTool{DataDir: cfg.DataDir})
+	toolRegistry.RegisterAlias("show_notes", "notes_show")
+	toolRegistry.RegisterAlias("list_notes", "notes_show")
+
+	toolRegistry.Register(&tools.NotesClearTool{DataDir: cfg.DataDir})
+	toolRegistry.RegisterAlias("clear_notes", "notes_clear")
 
 	toolRegistry.Register(&tools.ListAddTool{BaseDir: cfg.DataDir})
 	toolRegistry.RegisterAlias("list", "list_add") // ambiguous but 'list' implies adding often? or showing? 'list' command usually handled by router. But for tool call, list_add is safer default for 'list'.
@@ -92,6 +103,9 @@ func main() {
 	toolRegistry.Register(&tools.ListShowTool{BaseDir: cfg.DataDir})
 	toolRegistry.RegisterAlias("show_list", "list_show")
 	toolRegistry.RegisterAlias("get_list", "list_show")
+
+	toolRegistry.Register(&tools.ListListsTool{BaseDir: cfg.DataDir})
+	toolRegistry.RegisterAlias("lists", "list_lists")
 
 	addonMgr := addons.New("addons")
 	if err := addonMgr.Load(ctx, cfg.Addons, toolRegistry, adapterRegistry); err != nil {
@@ -211,83 +225,120 @@ func handleMessage(ctx context.Context, msg adapters.Message, adapter adapters.A
 	_ = sessions.SetUseLast(sessionKey, true)
 
 	// 3. PARSE & REPAIR
+	agentResp, ok := parseResponse(ctx, codexClient, adapter, msg.SenderID, text, resp.Text, state.ID, state.Dir)
+	if !ok {
+		return
+	}
+
+	// 4. EXECUTION
+	needProcess := processResponse(ctx, &agentResp, codexClient, adapter, msg.SenderID, toolRegistry, sched, state.ID, state.Dir)
+	if !needProcess {
+		return
+	}
+
+	for i := 0; i < 5; i++ {
+		stopTyping := startTyping(ctx, adapter, msg.SenderID)
+		nextResp, err := codexClient.Exec(ctx, state.ID, state.Dir, "continue", true)
+		stopTyping()
+		if err != nil {
+			_ = adapter.Send(ctx, msg.SenderID, "LLM Error: "+err.Error())
+			return
+		}
+
+		if nextResp.SessionID != "" && nextResp.SessionID != state.ID {
+			_ = sessions.SetSessionID(sessionKey, nextResp.SessionID)
+			state.ID = nextResp.SessionID
+		}
+		if nextResp.NewDir != "" && nextResp.NewDir != state.Dir {
+			_ = sessions.SetDir(sessionKey, nextResp.NewDir)
+			state.Dir = nextResp.NewDir
+		}
+
+		agentResp, ok = parseResponse(ctx, codexClient, adapter, msg.SenderID, "continue", nextResp.Text, state.ID, state.Dir)
+		if !ok {
+			return
+		}
+
+		if !processResponse(ctx, &agentResp, codexClient, adapter, msg.SenderID, toolRegistry, sched, state.ID, state.Dir) {
+			return
+		}
+	}
+}
+
+func parseResponse(ctx context.Context, codexClient *codex.Client, adapter adapters.Adapter, senderID, prompt, raw, sessionID, dir string) (ir.Response, bool) {
 	var agentResp ir.Response
-	if err := json.Unmarshal([]byte(resp.Text), &agentResp); err != nil {
+	if err := json.Unmarshal([]byte(raw), &agentResp); err != nil {
 		log.Printf("json parse error: %v. attempting repair...", err)
-		// Simple repair attempt
 		repairPrompt := fmt.Sprintf(`System: You returned invalid JSON. Fix it strictly following the schema.
 Input was: %s
 Output was: %s
 Error: %v
-Return JSON only.`, text, resp.Text, err)
+Return JSON only.`, prompt, raw, err)
 
-		stopTyping := startTyping(ctx, adapter, msg.SenderID)
-		repairResp, rErr := codexClient.Exec(ctx, state.ID, state.Dir, repairPrompt, false)
+		stopTyping := startTyping(ctx, adapter, senderID)
+		repairResp, rErr := codexClient.Exec(ctx, sessionID, dir, repairPrompt, false)
 		stopTyping()
 		if rErr == nil {
 			if err2 := json.Unmarshal([]byte(repairResp.Text), &agentResp); err2 == nil {
 				log.Println("repair successful")
 			} else {
 				log.Printf("repair failed: %v", err2)
-				// Fallback to raw text if it looks like a message
-				_ = adapter.Send(ctx, msg.SenderID, resp.Text)
-				return
+				_ = adapter.Send(ctx, senderID, raw)
+				return ir.Response{}, false
 			}
+		} else {
+			return ir.Response{}, false
 		}
 	}
 
-	// 4. EXECUTION
+	return agentResp, true
+}
+
+func processResponse(ctx context.Context, agentResp *ir.Response, codexClient *codex.Client, adapter adapters.Adapter, senderID string, toolRegistry *tools.Registry, sched *scheduler.Scheduler, sessionID, dir string) bool {
 	if agentResp.Reply != "" {
-		_ = adapter.Send(ctx, msg.SenderID, agentResp.Reply)
+		_ = adapter.Send(ctx, senderID, agentResp.Reply)
 	}
 
-	if agentResp.IR != nil {
-		// Validate
-		if err := agentResp.IR.Validate(); err != nil {
-			log.Printf("ir validation failed: %v. attempting repair...", err)
+	if agentResp.IR == nil {
+		return agentResp.NeedProcess
+	}
 
-			// Repair prompt for semantic errors
-			repairPrompt := fmt.Sprintf(`System: IR validation failed: %v. 
+	if err := agentResp.IR.Validate(); err != nil {
+		log.Printf("ir validation failed: %v. attempting repair...", err)
+		repairPrompt := fmt.Sprintf(`System: IR validation failed: %v. 
 You must fix the JSON. Allowed actions: act_now, schedule, ask, defer.
 Return JSON only.`, err)
 
-			stopTyping := startTyping(ctx, adapter, msg.SenderID)
-			repairResp, rErr := codexClient.Exec(ctx, state.ID, state.Dir, repairPrompt, false)
-			stopTyping()
-			if rErr == nil {
-				// We expect a full JSON response again
-				if err2 := json.Unmarshal([]byte(repairResp.Text), &agentResp); err2 == nil {
-					// Re-validate
-					if err3 := agentResp.IR.Validate(); err3 == nil {
-						log.Println("semantic repair successful")
-					} else {
-						log.Printf("semantic repair failed: %v", err3)
-						_ = adapter.Send(ctx, msg.SenderID, "Critical error: Agent produced invalid action twice.")
-						return
-					}
-				} else {
-					log.Printf("semantic repair json parse failed: %v", err2)
-					return
-				}
-			} else {
-				log.Printf("semantic repair exec failed: %v", rErr)
-				return
-			}
+		stopTyping := startTyping(ctx, adapter, senderID)
+		repairResp, rErr := codexClient.Exec(ctx, sessionID, dir, repairPrompt, false)
+		stopTyping()
+		if rErr != nil {
+			log.Printf("semantic repair exec failed: %v", rErr)
+			return false
 		}
-
-		// Handle special non-tool actions
-		if agentResp.IR.Action == ir.ActionListReminders {
-			jobs, err := sched.ListJobs()
-			if err != nil {
-				_ = adapter.Send(ctx, msg.SenderID, "Error listing jobs: "+err.Error())
-			} else {
-				_ = adapter.Send(ctx, msg.SenderID, strings.Join(jobs, "\n"))
-			}
-			return
+		if err2 := json.Unmarshal([]byte(repairResp.Text), agentResp); err2 != nil {
+			log.Printf("semantic repair json parse failed: %v", err2)
+			return false
 		}
-
-		executePacket(ctx, agentResp.IR, toolRegistry, adapter, msg.SenderID)
+		if err3 := agentResp.IR.Validate(); err3 != nil {
+			log.Printf("semantic repair failed: %v", err3)
+			_ = adapter.Send(ctx, senderID, "Critical error: Agent produced invalid action twice.")
+			return false
+		}
 	}
+
+	if agentResp.IR.Action == ir.ActionListReminders {
+		jobs, err := sched.ListJobs()
+		if err != nil {
+			_ = adapter.Send(ctx, senderID, "Error listing jobs: "+err.Error())
+		} else {
+			_ = adapter.Send(ctx, senderID, strings.Join(jobs, "\n"))
+		}
+		return agentResp.NeedProcess
+	}
+
+	executePacket(ctx, agentResp.IR, toolRegistry, adapter, senderID)
+	return agentResp.NeedProcess
 }
 
 func startTyping(ctx context.Context, adapter adapters.Adapter, target string) func() {

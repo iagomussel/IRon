@@ -190,3 +190,25 @@ func (t *ScheduleJobTool) Run(ctx context.Context, input json.RawMessage) (tools
 
 	return tools.Result{Output: fmt.Sprintf("Job '%s' scheduled @ %s", in.Name, in.Cron)}, nil
 }
+
+type ListRemindersTool struct {
+	scheduler *Scheduler
+}
+
+func NewListRemindersTool(s *Scheduler) *ListRemindersTool {
+	return &ListRemindersTool{scheduler: s}
+}
+
+func (t *ListRemindersTool) Name() string { return "list_reminders" }
+
+func (t *ListRemindersTool) Description() string {
+	return "List scheduled reminders and jobs. Args: none."
+}
+
+func (t *ListRemindersTool) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
+	jobs, err := t.scheduler.ListJobs()
+	if err != nil {
+		return tools.Result{Error: err.Error()}, err
+	}
+	return tools.Result{Output: strings.Join(jobs, "\n")}, nil
+}

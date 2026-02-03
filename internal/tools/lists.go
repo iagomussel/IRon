@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -140,4 +141,45 @@ func (t *ListShowTool) Run(ctx context.Context, input json.RawMessage) (Result, 
 	}
 
 	return Result{Output: fmt.Sprintf("List '%s':\n- %s", in.List, strings.Join(lines, "\n- "))}, nil
+}
+
+type ListListsTool struct {
+	BaseDir string
+}
+
+func (t *ListListsTool) Name() string { return "list_lists" }
+func (t *ListListsTool) Description() string {
+	return "List available lists. Args: none."
+}
+
+func (t *ListListsTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
+	base := filepath.Join(t.BaseDir, "lists")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Result{Output: "No lists found."}, nil
+		}
+		return Result{Error: err.Error()}, err
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".txt") {
+			name = strings.TrimSuffix(name, ".txt")
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	if len(names) == 0 {
+		return Result{Output: "No lists found."}, nil
+	}
+
+	sort.Strings(names)
+	return Result{Output: fmt.Sprintf("Lists:\n- %s", strings.Join(names, "\n- "))}, nil
 }

@@ -49,6 +49,19 @@ Every interaction with the Intelligence Layer results in a strictly validated JS
 *   **Scheduler (`internal/scheduler`)**: Handles time-based triggers using standard `cron` expressions or Go `time.Duration` structs. Persistent via `jobs.json`.
 *   **Tools (`internal/tools`)**: Go functions exposed to the IR layer (e.g., File I/O, Shell execution).
 
+## Deterministic Commands
+
+These commands bypass the LLM and map directly to tools:
+
+* `note: <text>` → append a note
+* `notes` / `show notes` → show notes
+* `clear notes` → clear notes
+* `list <name> += <item>` → add list item
+* `list <name> -= <item>` → remove list item
+* `list <name> ?` → show list items
+* `lists` → show available lists
+* `reminders` → list scheduled reminders/jobs
+
 ## BlueprintDSL
 
 For complex code generation or multi-step reasoning, we don't stream code directly to the chat. Instead, the IR contains a **BlueprintDSL**: a compact, declarative description of the intended system state.

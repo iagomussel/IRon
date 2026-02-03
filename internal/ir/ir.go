@@ -40,8 +40,28 @@ type Packet struct {
 
 // Response represents the specific dual-output format for the LLM
 type Response struct {
-	Reply string  `json:"reply"` // Short human message
-	IR    *Packet `json:"ir"`    // Machine action
+	Reply       string  `json:"reply"`       // Short human message
+	NeedProcess bool    `json:"needProcees"` // Whether the agent should continue
+	IR          *Packet `json:"ir"`          // Machine action
+}
+
+func (r *Response) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if v, ok := raw["reply"]; ok {
+		_ = json.Unmarshal(v, &r.Reply)
+	}
+	if v, ok := raw["ir"]; ok {
+		_ = json.Unmarshal(v, &r.IR)
+	}
+	if v, ok := raw["needProcees"]; ok {
+		_ = json.Unmarshal(v, &r.NeedProcess)
+	} else if v, ok := raw["needProcess"]; ok {
+		_ = json.Unmarshal(v, &r.NeedProcess)
+	}
+	return nil
 }
 
 // Validate checks if the packet is valid

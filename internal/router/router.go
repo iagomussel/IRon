@@ -44,6 +44,54 @@ func (r *Router) Route(text string) (*ir.Packet, bool) {
 		}, true
 	}
 
+	if lower == "reminders" || lower == "list reminders" || lower == "show reminders" {
+		return &ir.Packet{
+			Action:     ir.ActionActNow,
+			Intent:     "reminders.list",
+			Risk:       ir.RiskLow,
+			Confidence: 1.0,
+			Tools: []ir.ToolRequest{
+				{Name: "list_reminders", Args: json.RawMessage(`{}`)},
+			},
+		}, true
+	}
+
+	if lower == "notes" || lower == "show notes" || lower == "list notes" || lower == "notes?" {
+		return &ir.Packet{
+			Action:     ir.ActionActNow,
+			Intent:     "notes.show",
+			Risk:       ir.RiskLow,
+			Confidence: 1.0,
+			Tools: []ir.ToolRequest{
+				{Name: "notes_show", Args: json.RawMessage(`{}`)},
+			},
+		}, true
+	}
+
+	if lower == "clear notes" || lower == "notes clear" {
+		return &ir.Packet{
+			Action:     ir.ActionActNow,
+			Intent:     "notes.clear",
+			Risk:       ir.RiskLow,
+			Confidence: 1.0,
+			Tools: []ir.ToolRequest{
+				{Name: "notes_clear", Args: json.RawMessage(`{}`)},
+			},
+		}, true
+	}
+
+	if lower == "lists" || lower == "list lists" || lower == "show lists" {
+		return &ir.Packet{
+			Action:     ir.ActionActNow,
+			Intent:     "lists.show",
+			Risk:       ir.RiskLow,
+			Confidence: 1.0,
+			Tools: []ir.ToolRequest{
+				{Name: "list_lists", Args: json.RawMessage(`{}`)},
+			},
+		}, true
+	}
+
 	// Logic for specific "deterministic" commands can be added here.
 	// For instance, if the user starts with "note:" or "nota:", we map to notes_tool.
 	// Note DSL: "note: content" or "nota: content"
@@ -145,6 +193,14 @@ func (r *Router) GenerateReply(packet *ir.Packet) string {
 		return "Pong!"
 	case "notes.append":
 		return "Note saved."
+	case "notes.show":
+		return "Notes:"
+	case "notes.clear":
+		return "Notes cleared."
+	case "reminders.list":
+		return "Reminders:"
+	case "lists.show":
+		return "Lists:"
 	default:
 		return "Command processed."
 	}

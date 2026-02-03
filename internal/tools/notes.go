@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,9 @@ func (t *NotesTool) Run(ctx context.Context, input json.RawMessage) (Result, err
 	}
 
 	filename := filepath.Join(t.DataDir, "notes.txt")
+	if err := os.MkdirAll(t.DataDir, 0755); err != nil {
+		return Result{Error: err.Error()}, err
+	}
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return Result{Error: err.Error()}, err
@@ -51,4 +55,46 @@ func (t *NotesTool) Run(ctx context.Context, input json.RawMessage) (Result, err
 	}
 
 	return Result{Output: "Note appended successfully"}, nil
+}
+
+type NotesShowTool struct {
+	DataDir string
+}
+
+func (t *NotesShowTool) Name() string { return "notes_show" }
+func (t *NotesShowTool) Description() string {
+	return "Show notes. Args: none."
+}
+
+func (t *NotesShowTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
+	filename := filepath.Join(t.DataDir, "notes.txt")
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Result{Output: "No notes found."}, nil
+		}
+		return Result{Error: err.Error()}, err
+	}
+	trimmed := strings.TrimSpace(string(content))
+	if trimmed == "" {
+		return Result{Output: "No notes found."}, nil
+	}
+	return Result{Output: "Notes:\n" + trimmed}, nil
+}
+
+type NotesClearTool struct {
+	DataDir string
+}
+
+func (t *NotesClearTool) Name() string { return "notes_clear" }
+func (t *NotesClearTool) Description() string {
+	return "Clear all notes. Args: none."
+}
+
+func (t *NotesClearTool) Run(ctx context.Context, input json.RawMessage) (Result, error) {
+	filename := filepath.Join(t.DataDir, "notes.txt")
+	if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
+		return Result{Error: err.Error()}, err
+	}
+	return Result{Output: "Notes cleared."}, nil
 }
